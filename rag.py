@@ -8,82 +8,136 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
 
-# 1. Configuration & Keys
+# 1. Configuration & Keys (validated on first use so Streamlit can hydrate secrets first)
 load_dotenv()
 
 # 2026 Model Constants
 EMBEDDING_MODEL = "models/gemini-embedding-001"
-# DeepSeek-R1 is the "Math King" for reasoning in 2026
-LLM_MODEL = "llama-3.3-70b-versatile" 
+LLM_MODEL = "llama-3.1-8b-instant"
 VECTOR_STORE_PATH = Path(__file__).parent / "resources/math_vector_store"
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-    "Microsoft Edge/124.0.0.0"
-)
-os.environ.setdefault("USER_AGENT", DEFAULT_USER_AGENT)
 
-def initialize_math_rag():
-    """Initializes the Embedding and LLM components."""
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    groq_api_key = os.getenv("GROQ_API_KEY")
+llm = None
+embeddings = None
 
-    if not google_api_key or not groq_api_key:
+
+def initialize_components():
+    """Initializes the Embedding and LLM components (reads API keys from the environment)."""
+    global llm, embeddings
+    google_key = os.getenv("GOOGLE_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not google_key or not groq_key:
         raise ValueError(
             "Missing API keys. Set GOOGLE_API_KEY and GROQ_API_KEY via .env, "
             "environment variables, or Streamlit secrets."
         )
+    print("Initializing components...")
+    if llm is None:
+        llm = ChatGroq(
+            model=LLM_MODEL,
+            temperature=0.1,
+            api_key=groq_key,
+        )
+    if embeddings is None:
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            google_api_key=google_key,
+        )
 
-    embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=google_api_key)
-    
-    # We use a lower temperature (0.1) for Math to ensure accuracy over creativity
-    llm = ChatGroq(
-        model=LLM_MODEL, 
-        temperature=0.1, 
-        api_key=groq_api_key
-    )
-    return embeddings, llm
 
-def build_knowledge_base(urls, embeddings):
-    """Scrapes UP Board/NCERT data and saves it locally."""
-    print("Loading Math resources...")
-    user_agent = os.getenv("USER_AGENT", DEFAULT_USER_AGENT)
-    loader = WebBaseLoader(
-        web_paths=urls,
-        requests_kwargs={"headers": {"User-Agent": user_agent}},
-    )
-    docs = loader.load()
+_DEFAULT_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-    # Math-Specific Splitter: Higher overlap to keep formulas together
+
+def process_urls(urls, embeddings_model=None):
+    """Load pages from URLs, split into chunks, build FAISS index, persist, and return it.
+
+    Fetches each URL separately so failures report the exact URL (e.g. connection aborted).
+    """
+    initialize_components()
+    emb = embeddings_model if embeddings_model is not None else embeddings
+    if not urls:
+        raise ValueError("At least one URL is required.")
+
+    documents = []
+    failures: list[tuple[str, str]] = []
+    for url in urls:
+        u = url.strip()
+        if not u:
+            continue
+        try:
+            loader = WebBaseLoader(
+                web_paths=[u],
+                requests_kwargs={
+                    "timeout": 60,
+                    "headers": _DEFAULT_BROWSER_HEADERS,
+                },
+            )
+            documents.extend(loader.load())
+        except Exception as exc:
+            failures.append((u, f"{type(exc).__name__}: {exc}"))
+
+    if failures:
+        detail = "\n".join(f"  • {u}\n    → {err}" for u, err in failures)
+        if not documents:
+            raise RuntimeError(
+                "Could not load any URL. Fix or remove the failing link(s):\n" + detail
+            ) from None
+        print(
+            "Warning: some URLs failed (others were indexed):\n" + detail,
+            flush=True,
+        )
+
+    if not documents:
+        raise ValueError("No page content was loaded; check your URLs.")
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150,
-        separators=["\n\n", "\n", ".", " ", ""]
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
+        chunk_size=1000,
+        chunk_overlap=200,
     )
-    chunks = text_splitter.split_documents(docs)
-    
-    vector_store = FAISS.from_documents(chunks, embeddings)
+    chunks = text_splitter.split_documents(documents)
+    vector_store = FAISS.from_documents(chunks, emb)
+    VECTOR_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     vector_store.save_local(str(VECTOR_STORE_PATH))
-    print(f"Knowledge base saved to {VECTOR_STORE_PATH}")
     return vector_store
 
-def get_math_help(vector_store, llm, student_query):
-    """Retrieves context and generates a step-by-step math explanation."""
 
+def build_knowledge_base(urls, embeddings_model=None):
+    """Build and persist the FAISS store from URLs."""
+    return process_urls(urls, embeddings_model)
+
+
+def initialize_math_rag():
+    """Create shared LLM and embedding clients (for scripts or advanced use)."""
+    initialize_components()
+    return embeddings, llm
+
+
+def get_math_help(vector_store, llm_client, student_query):
+    """Retrieves context and generates an answer from the vector store.
+
+    Uses langchain-core only (no langchain.chains), equivalent to stuff + retrieval.
+
+    Returns:
+        tuple[str, str]: (answer, newline-separated unique source hints from retrieved docs).
+    """
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
-    
-    # Custom System Prompt for U.P. Board Students
+
     system_prompt = (
-        "You are a helpful U.P. Board Math Assistant. "
-        "Use the provided context to explain mathematical concepts step-by-step. "
+        "You are an Assistant for question-answer tasks. "
+        "Use the following pieces of retrieved context to answer the question. "
         "If the question is in Hindi, answer in Hindi. If English, answer in English. "
         "Always show the formula used before solving. "
+        "if you don't know the answer, say 'I don't know the answer to that question. Please try again with a different question.' "
         "\n\n"
         "Context: {context}"
     )
@@ -93,35 +147,40 @@ def get_math_help(vector_store, llm, student_query):
         ("human", "{input}"),
     ])
 
-    # Build the RAG Chain (LCEL) without requiring `langchain.chains`
     retriever = vector_store.as_retriever()
-    rag_chain = (
-        {"context": retriever | format_docs, "input": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
     print(f"\nThinking about: {student_query}")
-    return rag_chain.invoke(student_query)
+    docs = retriever.invoke(student_query)
+    context = format_docs(docs)
+    chain = prompt | llm_client | StrOutputParser()
+    answer = chain.invoke({"context": context, "input": student_query})
+    sources_lines = []
+    for d in docs:
+        src = getattr(d, "metadata", None) and d.metadata.get("source")
+        sources_lines.append(
+            src if src else (d.page_content[:120] + "..." if d.page_content else "")
+        )
+    sources = "\n".join(dict.fromkeys(s for s in sources_lines if s))
+    return answer, sources
+
+
+def get_answer(vector_store, query):
+    """Run RAG over `vector_store` for `query`; uses the shared LLM from initialize_components."""
+    initialize_components()
+    return get_math_help(vector_store, llm, query)
+
 
 if __name__ == "__main__":
-    # Suggested U.P. Board / NCERT Math Resources
     math_urls = [
         "https://openstax.org/details/books/elementary-algebra-2e",
-        "https://www.google.com/search?q=https://www.ck12.org/book/ck-12-algebra-i-second-edition/section/10.0/",
+        "https://www.ck12.org/book/ck-12-algebra-i-second-edition/section/10.0/",
     ]
-        
 
-    # Initialize
-    emb, llm = initialize_math_rag()
-
-    # Step 1: Ingest (Run this once, then you can comment it out)
-    v_store = build_knowledge_base(math_urls, emb)
-
-    # Step 2: Query
+    v_store = process_urls(math_urls)
     query = "द्विघात समीकरण (Quadratic Equation) को हल करने का सूत्र क्या है?"
-    answer = get_math_help(v_store, llm, query)
-    
+    answer, sources = get_answer(v_store, query)
+
     print("\n--- ASSISTANT RESPONSE ---")
     print(answer)
+    if sources:
+        print("\n--- SOURCES ---")
+        print(sources)
