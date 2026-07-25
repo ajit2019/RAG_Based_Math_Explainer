@@ -10,13 +10,11 @@ from rag import get_answer, process_urls
 
 def _hydrate_env_from_streamlit_secrets() -> None:
     """Populate env vars from Streamlit secrets when running in cloud."""
-    if "GOOGLE_API_KEY" not in os.environ and "GOOGLE_API_KEY" in st.secrets:
-        os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
     if "GROQ_API_KEY" not in os.environ and "GROQ_API_KEY" in st.secrets:
         os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
 
-APP_TITLE = "Real Estate Research Tool"
+APP_TITLE = "RAG Based Math Solver"
 
 
 def main():
@@ -24,9 +22,9 @@ def main():
     st.title(APP_TITLE)
 
     _hydrate_env_from_streamlit_secrets()
-    if not os.getenv("GOOGLE_API_KEY") or not os.getenv("GROQ_API_KEY"):
+    if not os.getenv("GROQ_API_KEY"):
         st.error(
-            "Missing API keys. Set `GOOGLE_API_KEY` and `GROQ_API_KEY` in your `.env`, "
+            "Missing API key. Set `GROQ_API_KEY` in your `.env`, "
             "environment, or Streamlit secrets."
         )
         st.stop()

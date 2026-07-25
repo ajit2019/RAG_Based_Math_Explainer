@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 # LangChain Imports
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_groq import ChatGroq
 from langchain_core.output_parsers import StrOutputParser
@@ -14,8 +14,8 @@ from langchain_core.prompts import ChatPromptTemplate
 # 1. Configuration & Keys (validated on first use so Streamlit can hydrate secrets first)
 load_dotenv()
 
-# 2026 Model Constants
-EMBEDDING_MODEL = "models/gemini-embedding-001"
+# Model Constants
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 LLM_MODEL = "llama-3.1-8b-instant"
 VECTOR_STORE_PATH = Path(__file__).parent / "resources/math_vector_store"
 
@@ -24,13 +24,12 @@ embeddings = None
 
 
 def initialize_components():
-    """Initializes the Embedding and LLM components (reads API keys from the environment)."""
+    """Initializes the Embedding and LLM components."""
     global llm, embeddings
-    google_key = os.getenv("GOOGLE_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
-    if not google_key or not groq_key:
+    if not groq_key:
         raise ValueError(
-            "Missing API keys. Set GOOGLE_API_KEY and GROQ_API_KEY via .env, "
+            "Missing API key. Set GROQ_API_KEY via .env, "
             "environment variables, or Streamlit secrets."
         )
     print("Initializing components...")
@@ -41,9 +40,10 @@ def initialize_components():
             api_key=groq_key,
         )
     if embeddings is None:
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            google_api_key=google_key,
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
         )
 
 
